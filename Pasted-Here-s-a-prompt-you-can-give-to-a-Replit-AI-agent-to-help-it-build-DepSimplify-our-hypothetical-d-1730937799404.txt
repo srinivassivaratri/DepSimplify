@@ -1,0 +1,55 @@
+Here's a prompt you can give to a Replit AI agent to help it build "DepSimplify", our hypothetical dependency management tool for Python:
+
+---
+
+**Project: DepSimplify - A Python Dependency Management Tool**
+
+**Objective**: Your task is to develop a Python package named "DepSimplify" that simplifies dependency management by:
+
+1. **Automated Dependency Resolution**:
+   - Use Python's `setuptools` or a similar tool to define and manage dependencies.
+   - Implement a system where dependencies are automatically resolved based on compatibility rules or user-defined preferences.
+
+2. **Interactive Command Line Interface (CLI)**:
+   - Create an interactive CLI using a library like `click` or `argparse`, which allows users to:
+     - View and manage project dependencies.
+     - Resolve conflicts interactively by presenting options for version compatibility.
+     - Suggest updates to dependencies that would cause the least disruption to the project.
+
+3. **Conflict Resolution**:
+   - Develop algorithms or integrate existing ones (like those from `pip` dependency resolution but improved) to detect and resolve version conflicts. 
+   - Offer users a choice in conflict resolution, or automatically choose based on predefined strategies (e.g., minimal disruption).
+
+4. **Caching and Speed Optimization**:
+   - Implement caching mechanisms to store previously resolved dependencies to speed up subsequent builds.
+   - Use multiprocessing or asynchronous operations for checking dependencies to reduce the time taken for installations.
+
+5. **Documentation and Testing**:
+   - Provide comprehensive documentation on how to use DepSimplify, including installation instructions, usage examples, and API documentation if applicable.
+   - Include unit tests to verify the functionality of dependency resolution, CLI interactivity, and conflict handling.
+
+**Setup Instructions**:
+- Use Python 3.9+ for development.
+- Create a new Replit project with Python environment.
+- Set up version control with Git for code management.
+- Use `poetry` or `pipenv` for managing the tool's own dependencies if possible.
+
+**Deliverables**:
+- A `DepSimplify` package that can be installed via `pip`.
+- A command-line tool that users can run to manage dependencies.
+- Documentation (README.md, possibly a Wiki or detailed comments within the code).
+- Test suite to ensure robustness.
+
+**Bonus Features** (if time allows):
+- A web interface or an extension for IDEs like VSCode for visual dependency management.
+- Integration with CI/CD pipelines for automatic dependency checks on code push.
+
+**Start Coding**:
+- Begin by setting up the project structure, planning the CLI layout, and sketching the dependency resolution logic.
+- Use Python's vast ecosystem to leverage existing tools and libraries where possible, enhancing them with your unique features.
+
+Remember, the universe is full of dependencies; we're just trying to manage them a bit more elegantly here on Earth. Go forth and simplify!
+
+---
+
+This prompt should give the AI agent a clear path to start building "DepSimplify" while encouraging some creativity and problem-solving.
