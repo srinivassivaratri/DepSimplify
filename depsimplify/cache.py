@@ -1,93 +1,196 @@
-import json
 import os
-from typing import Dict, List, Optional, Set
+import sqlite3
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
+import json
 
 class DependencyCache:
-    """Cache for dependency resolution results"""
+    """Cache for dependency resolution results using SQLite"""
     
     def __init__(self, cache_dir: str = '.depsimplify'):
         self.cache_dir = cache_dir
-        self.cache_file = os.path.join(cache_dir, 'cache.json')
+        self.db_file = os.path.join(cache_dir, 'cache.db')
         self.cache_expiry = timedelta(days=1)  # Cache expires after 1 day
 
     def initialize(self) -> None:
-        """Initialize cache directory and file"""
+        """Initialize SQLite database and create required tables"""
         os.makedirs(self.cache_dir, exist_ok=True)
-        if not os.path.exists(self.cache_file):
-            self._save_cache({
-                'conflicts': {},
-                'compatible_versions': {},
-                'resolutions': {},
-                'last_updated': datetime.now().isoformat()
-            })
-
-    def _load_cache(self) -> Dict:
-        """Load cache from file"""
+        
         try:
-            if not os.path.exists(self.cache_file):
-                return {}
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
                 
-            with open(self.cache_file, 'r') as f:
-                cache = json.load(f)
+                # Create tables for different types of cache data
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS conflicts (
+                        dependencies_key TEXT PRIMARY KEY,
+                        conflicts_data TEXT NOT NULL,
+                        last_updated TIMESTAMP NOT NULL
+                    )
+                ''')
                 
-            # Check cache expiry
-            last_updated = datetime.fromisoformat(cache.get('last_updated', '2000-01-01'))
-            if datetime.now() - last_updated > self.cache_expiry:
-                return {}
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS compatible_versions (
+                        conflict_key TEXT PRIMARY KEY,
+                        versions TEXT NOT NULL,
+                        last_updated TIMESTAMP NOT NULL
+                    )
+                ''')
                 
-            return cache
-        except Exception:
-            return {}
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS resolutions (
+                        package TEXT PRIMARY KEY,
+                        version TEXT NOT NULL,
+                        last_updated TIMESTAMP NOT NULL
+                    )
+                ''')
+                
+                # Create indices for better performance
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_conflicts_last_updated ON conflicts(last_updated)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_compatible_versions_last_updated ON compatible_versions(last_updated)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_resolutions_last_updated ON resolutions(last_updated)')
+                
+                conn.commit()
+        except sqlite3.Error as e:
+            os.makedirs(self.cache_dir, exist_ok=True)  # Ensure directory exists
+            if os.path.exists(self.db_file):
+                os.remove(self.db_file)  # Remove corrupted database
+            raise Exception(f"Failed to initialize cache database: {str(e)}")
 
-    def _save_cache(self, cache_data: Dict) -> None:
-        """Save cache to file"""
+    def _is_cache_valid(self, last_updated: str) -> bool:
+        """Check if cache entry is still valid"""
+        if not last_updated:
+            return False
         try:
-            cache_data['last_updated'] = datetime.now().isoformat()
-            with open(self.cache_file, 'w') as f:
-                json.dump(cache_data, f)
-        except Exception:
-            pass
+            updated_time = datetime.fromisoformat(last_updated)
+            return datetime.now() - updated_time <= self.cache_expiry
+        except (ValueError, TypeError):
+            return False
 
     def get_conflicts(self, dependencies: Dict[str, List[str]]) -> Optional[Dict]:
         """Get cached conflicts for dependencies"""
-        cache = self._load_cache()
+        if not dependencies:
+            return None
+            
         deps_key = json.dumps(dependencies, sort_keys=True)
-        return cache.get('conflicts', {}).get(deps_key)
+        
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'SELECT conflicts_data, last_updated FROM conflicts WHERE dependencies_key = ?',
+                    (deps_key,)
+                )
+                row = cursor.fetchone()
+                
+                if row and self._is_cache_valid(row[1]):
+                    return json.loads(row[0])
+                return None
+                
+        except (sqlite3.Error, json.JSONDecodeError):
+            return None
 
     def store_conflicts(self, dependencies: Dict[str, List[str]], conflicts: Dict) -> None:
-        """Store conflicts in cache"""
-        cache = self._load_cache()
+        """Store conflicts in SQLite cache"""
+        if not dependencies or not conflicts:
+            return
+            
         deps_key = json.dumps(dependencies, sort_keys=True)
-        if 'conflicts' not in cache:
-            cache['conflicts'] = {}
-        cache['conflicts'][deps_key] = conflicts
-        self._save_cache(cache)
+        conflicts_data = json.dumps(conflicts)
+        last_updated = datetime.now().isoformat()
+        
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    '''INSERT OR REPLACE INTO conflicts 
+                       (dependencies_key, conflicts_data, last_updated) 
+                       VALUES (?, ?, ?)''',
+                    (deps_key, conflicts_data, last_updated)
+                )
+                conn.commit()
+        except sqlite3.Error:
+            pass
 
-    def get_compatible_versions(self, package: str, conflict: Dict[str, Set[str]]) -> Optional[List[str]]:
+    def get_compatible_versions(self, package: str, conflict: Dict[str, List[str]]) -> Optional[List[str]]:
         """Get cached compatible versions"""
-        cache = self._load_cache()
+        if not package or not conflict:
+            return None
+            
         conflict_key = json.dumps({'package': package, 'conflict': conflict}, sort_keys=True)
-        return cache.get('compatible_versions', {}).get(conflict_key)
+        
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'SELECT versions, last_updated FROM compatible_versions WHERE conflict_key = ?',
+                    (conflict_key,)
+                )
+                row = cursor.fetchone()
+                
+                if row and self._is_cache_valid(row[1]):
+                    return json.loads(row[0])
+                return None
+                
+        except (sqlite3.Error, json.JSONDecodeError):
+            return None
 
-    def store_compatible_versions(self, package: str, conflict: Dict[str, Set[str]], versions: List[str]) -> None:
-        """Store compatible versions in cache"""
-        cache = self._load_cache()
+    def store_compatible_versions(self, package: str, conflict: Dict[str, List[str]], versions: List[str]) -> None:
+        """Store compatible versions in SQLite cache"""
+        if not package or not conflict or not versions:
+            return
+            
         conflict_key = json.dumps({'package': package, 'conflict': conflict}, sort_keys=True)
-        if 'compatible_versions' not in cache:
-            cache['compatible_versions'] = {}
-        cache['compatible_versions'][conflict_key] = versions
-        self._save_cache(cache)
+        versions_data = json.dumps(versions)
+        last_updated = datetime.now().isoformat()
+        
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    '''INSERT OR REPLACE INTO compatible_versions 
+                       (conflict_key, versions, last_updated) 
+                       VALUES (?, ?, ?)''',
+                    (conflict_key, versions_data, last_updated)
+                )
+                conn.commit()
+        except sqlite3.Error:
+            pass
 
     def store_resolutions(self, resolved_deps: Dict[str, str]) -> None:
-        """Store resolved dependencies"""
-        cache = self._load_cache()
-        if 'resolutions' not in cache:
-            cache['resolutions'] = {}
-        cache['resolutions'].update(resolved_deps)
-        self._save_cache(cache)
+        """Store resolved dependencies in SQLite cache"""
+        if not resolved_deps:
+            return
+            
+        last_updated = datetime.now().isoformat()
+        
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                for package, version in resolved_deps.items():
+                    if package and version:
+                        cursor.execute(
+                            '''INSERT OR REPLACE INTO resolutions 
+                               (package, version, last_updated) 
+                               VALUES (?, ?, ?)''',
+                            (package, version, last_updated)
+                        )
+                conn.commit()
+        except sqlite3.Error:
+            pass
 
     def get_resolutions(self) -> Dict[str, str]:
         """Get cached dependency resolutions"""
-        cache = self._load_cache()
-        return cache.get('resolutions', {})
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    '''SELECT package, version, last_updated 
+                       FROM resolutions 
+                       WHERE last_updated > ?''',
+                    ((datetime.now() - self.cache_expiry).isoformat(),)
+                )
+                return {row[0]: row[1] for row in cursor.fetchall() if row[0] and row[1]}
+                
+        except sqlite3.Error:
+            return {}
