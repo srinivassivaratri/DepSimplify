@@ -1,0 +1,11 @@
+[project]
+name = "repl-nix-depsimplify"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.0.0",
+    "packaging>=21.0",
+    "pytest>=8.3.3",
+    "requests>=2.25.0",
+]
