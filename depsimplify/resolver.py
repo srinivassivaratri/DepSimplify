@@ -1,7 +1,8 @@
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple, Optional
 import requests
 from packaging.version import Version, parse
 from packaging.specifiers import SpecifierSet
+from packaging.requirements import Requirement
 from .exceptions import DependencyError
 from .cache import DependencyCache
 
@@ -12,7 +13,53 @@ class DependencyResolver:
         self.cache = DependencyCache()
         self.pypi_url = "https://pypi.org/pypi/{package}/json"
 
-    def find_conflicts(self, dependencies: Dict[str, List[str]]) -> Dict[str, Dict[str, list]]:
+    def _get_package_metadata(self, package: str) -> dict:
+        """Get package metadata from PyPI"""
+        response = requests.get(self.pypi_url.format(package=package))
+        response.raise_for_status()
+        return response.json()
+        
+    def _get_package_dependencies(self, package: str, version: str = None) -> Dict[str, List[str]]:
+        """Get package dependencies from PyPI"""
+        pkg_data = self._get_package_metadata(package)
+        
+        # Get dependencies from info section (these are the declared dependencies)
+        info = pkg_data.get('info', {})
+        requires_dist = info.get('requires_dist', [])
+        dependencies = {}
+        
+        for req_str in requires_dist:
+            try:
+                # Skip environment markers and extras
+                if ';' in req_str:
+                    req_str = req_str.split(';')[0].strip()
+                if 'extra ==' in req_str:
+                    continue
+                    
+                req = Requirement(req_str)
+                if req.specifier:
+                    dependencies[req.name] = [str(spec) for spec in req.specifier]
+            except Exception:
+                continue
+                
+        return dependencies
+
+    def _check_version_compatibility(self, versions: List[str], specs: List[str]) -> Set[str]:
+        """Check which versions are compatible with given specifications"""
+        compatible = set()
+        try:
+            spec_set = SpecifierSet(','.join(specs))
+            for version in versions:
+                try:
+                    if spec_set.contains(version):
+                        compatible.add(version)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return compatible
+
+    def find_conflicts(self, dependencies: Dict[str, List[str]]) -> Dict[str, Dict[str, List[str]]]:
         """Find conflicting dependencies"""
         conflicts = {}
         
@@ -21,147 +68,94 @@ class DependencyResolver:
         if cached_conflicts:
             return cached_conflicts
 
-        # First check direct requirements compatibility
-        for pkg_name, pkg_specs in dependencies.items():
-            try:
-                response = requests.get(self.pypi_url.format(package=pkg_name))
-                response.raise_for_status()
-                pkg_data = response.json()
-                
-                # Get all versions for this package
-                pkg_versions = self._get_package_versions(pkg_name)
-                pkg_spec_set = SpecifierSet(','.join(pkg_specs))
-                
-                # Find versions that satisfy direct requirements
-                compatible_versions = [str(v) for v in pkg_versions if pkg_spec_set.contains(v)]
-                
-                if not compatible_versions:
-                    if pkg_name not in conflicts:
-                        conflicts[pkg_name] = {}
-                    conflicts[pkg_name]['direct'] = list(pkg_specs)
-                    continue
-
-                # Get the latest compatible version to check its dependencies
-                latest_compatible = max(compatible_versions, key=parse)
-                release_data = [r for r in pkg_data['releases'][latest_compatible] if r.get('requires_dist')]
-                
-                if release_data:
-                    # Check package's dependencies
-                    for req in release_data[0].get('requires_dist', []):
-                        try:
-                            dep_name = req.split(' ')[0].lower()
-                            if dep_name in dependencies:
-                                dep_specs = req.split('(')[1].split(')')[0] if '(' in req else ''
-                                if dep_specs:
-                                    # Get the version range required by this package
-                                    pkg_dep_spec_set = SpecifierSet(dep_specs)
-                                    # Get the version range from direct requirements
-                                    direct_spec_set = SpecifierSet(','.join(dependencies[dep_name]))
-                                    
-                                    # Get all versions of the dependency
-                                    dep_versions = self._get_package_versions(dep_name)
-                                    
-                                    # Check if any version satisfies both requirements
-                                    compatible_dep_versions = [
-                                        v for v in dep_versions 
-                                        if pkg_dep_spec_set.contains(v) and direct_spec_set.contains(v)
-                                    ]
-                                    
-                                    if not compatible_dep_versions:
-                                        if dep_name not in conflicts:
-                                            conflicts[dep_name] = {}
-                                        conflicts[dep_name][pkg_name] = list(pkg_dep_spec_set)
-                                        
-                        except Exception:
-                            continue
-            except Exception as e:
-                raise DependencyError(f"Error checking conflicts for {pkg_name}: {str(e)}")
-                
-        # Check transitive dependencies
-        for pkg_name, pkg_specs in dependencies.items():
-            if pkg_name in conflicts:
-                continue
-            try:
-                response = requests.get(self.pypi_url.format(package=pkg_name))
-                response.raise_for_status()
-                pkg_data = response.json()
-                
-                pkg_versions = self._get_package_versions(pkg_name)
-                pkg_spec_set = SpecifierSet(','.join(pkg_specs))
-                compatible_versions = [str(v) for v in pkg_versions if pkg_spec_set.contains(v)]
-                
-                if compatible_versions:
-                    latest_compatible = max(compatible_versions, key=parse)
-                    release_data = [r for r in pkg_data['releases'][latest_compatible] if r.get('requires_dist')]
+        try:
+            # First pass: Get all direct and transitive dependencies
+            dep_graph = {}
+            for pkg_name, specs in dependencies.items():
+                try:
+                    # Get package metadata and check direct compatibility
+                    pkg_data = self._get_package_metadata(pkg_name)
+                    all_versions = list(pkg_data['releases'].keys())
+                    compatible = self._check_version_compatibility(all_versions, specs)
                     
-                    if release_data:
-                        for req in release_data[0].get('requires_dist', []):
-                            try:
-                                dep_name = req.split(' ')[0].lower()
-                                if dep_name in dependencies:
-                                    dep_specs = req.split('(')[1].split(')')[0] if '(' in req else ''
-                                    pkg_dep_spec_set = SpecifierSet(dep_specs)
-                                    direct_spec_set = SpecifierSet(','.join(dependencies[dep_name]))
-                                    
-                                    if not any(pkg_dep_spec_set.contains(Version(ver)) and direct_spec_set.contains(Version(ver)) 
-                                             for ver in compatible_versions):
-                                        if pkg_name not in conflicts:
-                                            conflicts[pkg_name] = {}
-                                        conflicts[pkg_name][dep_name] = list(pkg_dep_spec_set)
-                            except Exception:
-                                continue
-                                
-            except Exception:
-                continue
+                    if not compatible:
+                        conflicts[pkg_name] = {'direct': specs}
+                        continue
+                        
+                    # Get transitive dependencies
+                    trans_deps = self._get_package_dependencies(pkg_name)
+                    dep_graph[pkg_name] = {
+                        'specs': specs,
+                        'requires': trans_deps
+                    }
+                    
+                except Exception as e:
+                    conflicts[pkg_name] = {'error': str(e)}
 
-        # Cache the results
-        self.cache.store_conflicts(dependencies, conflicts)
-        return conflicts
+            # Second pass: Check for conflicts between direct and transitive dependencies
+            for pkg_name, pkg_info in dep_graph.items():
+                for dep_name, dep_specs in pkg_info['requires'].items():
+                    if dep_name in dependencies:  # Only check conflicts with direct dependencies
+                        try:
+                            # Get all versions of the dependency
+                            dep_data = self._get_package_metadata(dep_name)
+                            all_versions = list(dep_data['releases'].keys())
+                            
+                            # Check compatibility with direct requirement
+                            direct_compatible = self._check_version_compatibility(all_versions, dependencies[dep_name])
+                            
+                            # Check compatibility with transitive requirement
+                            trans_compatible = self._check_version_compatibility(all_versions, dep_specs)
+                            
+                            # If no overlap in compatible versions, we have a conflict
+                            if not direct_compatible.intersection(trans_compatible):
+                                if dep_name not in conflicts:
+                                    conflicts[dep_name] = {}
+                                conflicts[dep_name][pkg_name] = dep_specs
+                                
+                        except Exception as e:
+                            if dep_name not in conflicts:
+                                conflicts[dep_name] = {}
+                            conflicts[dep_name]['error'] = str(e)
+
+            # Cache results
+            self.cache.store_conflicts(dependencies, conflicts)
+            return conflicts
+
+        except Exception as e:
+            raise DependencyError(f"Error checking conflicts: {str(e)}")
 
     def get_compatible_versions(self, package: str, conflict: Dict[str, List[str]]) -> List[str]:
         """Get list of versions compatible with all requirements"""
         try:
-            # Convert conflict specs to lists for JSON serialization
-            json_safe_conflict = {k: list(v) for k, v in conflict.items()}
+            # Convert conflict specs to sets for JSON serialization
+            json_safe_conflict = {k: list(v) if isinstance(v, (list, set)) else v 
+                                for k, v in conflict.items()}
             
             # Check cache first
             cached_versions = self.cache.get_compatible_versions(package, json_safe_conflict)
             if cached_versions:
                 return cached_versions
 
-            all_versions = self._get_package_versions(package)
-            all_specs = set()
+            # Get all versions
+            pkg_data = self._get_package_metadata(package)
+            all_versions = list(pkg_data['releases'].keys())
+
+            # Collect all specs
+            specs = []
+            for spec_list in conflict.values():
+                if isinstance(spec_list, (list, set)):
+                    specs.extend(spec_list)
+
+            # Find compatible versions
+            compatible = self._check_version_compatibility(all_versions, specs)
             
-            # Collect all version specifications
-            for specs in conflict.values():
-                if isinstance(specs, (list, set)):
-                    all_specs.update(specs)
-            
-            if not all_specs:
-                return [str(v) for v in all_versions[:5]]  # Return top 5 versions if no specific requirements
-                
-            # Create a SpecifierSet from all requirements
-            spec_set = SpecifierSet(','.join(all_specs))
-            
-            # Find versions that satisfy all requirements
-            compatible_versions = [str(v) for v in all_versions if spec_set.contains(v)][:5]  # Limit to top 5 versions
-            
-            # Cache the results
+            # Sort and limit results
+            compatible_versions = sorted(list(compatible), key=parse, reverse=True)[:5]
+
+            # Cache results
             self.cache.store_compatible_versions(package, json_safe_conflict, compatible_versions)
             return compatible_versions
-            
+
         except Exception as e:
             raise DependencyError(f"Error finding compatible versions for {package}: {str(e)}")
-
-    def _get_package_versions(self, package: str) -> List[Version]:
-        """Get available versions for a package from PyPI"""
-        try:
-            response = requests.get(self.pypi_url.format(package=package))
-            response.raise_for_status()
-            
-            releases = response.json()['releases']
-            versions = [parse(v) for v in releases.keys()]
-            return sorted(versions, reverse=True)
-            
-        except Exception as e:
-            raise DependencyError(f"Error fetching versions for {package} from PyPI: {str(e)}")
