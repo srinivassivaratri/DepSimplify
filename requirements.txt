@@ -1,6 +1,10 @@
 # Demo requirements with conflicting dependencies
 requests>=2.25.0,<3.0.0    # This requires urllib3>=1.25.3
-urllib3==1.24.0            # This conflicts with requests' requirement
+urllib3>=2.0.0             # Updated to latest major version to resolve SSL warnings
 flask>=2.0.0,<3.0.0        # Additional package for demo
 werkzeug>=2.0.0,<3.0.0     # Required by Flask, adding for more complex demo
 pytest
+flask>=2.0.0
+requests>=2.25.0
+urllib3>=2.0.0
+werkzeug>=2.0.0
